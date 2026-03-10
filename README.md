@@ -10,6 +10,29 @@ The publisher sets one number: what percentage of conversations should include a
 - **PID feedback loop.** If the recommendation rate exceeds the target, τ tightens. If it's below, τ loosens. Integral and derivative terms handle drift and sudden changes.
 - **Runs on the publisher's infrastructure.** No exchange dependency.
 
+## Simulation results
+
+`uv run --with matplotlib simulate.py` runs 5,000 conversations across four target rates and a shock scenario.
+
+### Convergence
+
+The controller converges to the target recommendation rate from an arbitrary starting τ:
+
+| Target | Equilibrium τ | Final τ | Final Rate | Error |
+|--------|--------------|---------|------------|-------|
+| 5% | 0.150 | 0.105 | 7% | 0.020 |
+| 10% | 0.300 | 0.319 | 12% | 0.020 |
+| 20% | 0.600 | 0.624 | 20% | 0.000 |
+| 30% | 0.900 | 0.910 | 26% | 0.040 |
+
+![Tau convergence by target rate](convergence.png)
+
+### Shock recovery
+
+When a new advertiser category enters (ad distances suddenly halve), τ tightens to maintain the target rate:
+
+![Tau recovery after shock](shock_recovery.png)
+
 ## Usage
 
 ```python
