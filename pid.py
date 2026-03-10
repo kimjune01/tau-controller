@@ -7,8 +7,13 @@ space) to hit that target.
 
 Unit: per-conversation, not per-turn. A conversation is a series of turns.
 One recommendation per conversation, max.
+
+PRIVACY: This code never sees embeddings, user data, or content. It only
+processes distances (floats) and opaque conversation IDs (strings).
+Conversation IDs MUST be opaque tokens (e.g. UUIDs), never PII or PHI.
 """
 
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -24,10 +29,12 @@ class TauController:
     tau: float = 1.0    # initial distance threshold
     tau_min: float = 0.01
     tau_max: float = 10.0
+    integral_max: float = 10.0  # anti-windup clamp
 
     _integral: float = field(default=0.0, init=False)
     _prev_error: float = field(default=0.0, init=False)
     _prev_time: float = field(default=0.0, init=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self):
         self._prev_time = time.monotonic()
@@ -43,49 +50,90 @@ class TauController:
         Returns:
             The new tau value.
         """
-        now = time.monotonic()
-        dt = now - self._prev_time
-        if dt <= 0:
+        with self._lock:
+            now = time.monotonic()
+            dt = now - self._prev_time
+            if dt <= 0:
+                return self.tau
+
+            # Error: positive means rate is too high, tau should tighten (decrease)
+            error = observed_rate - self.target_rate
+
+            self._integral += error * dt
+            self._integral = max(-self.integral_max, min(self.integral_max, self._integral))
+
+            derivative = (error - self._prev_error) / dt
+
+            adjustment = (self.kp * error) + (self.ki * self._integral) + (self.kd * derivative)
+
+            # Negative adjustment = tighten tau (lower distance threshold)
+            self.tau -= adjustment
+            self.tau = max(self.tau_min, min(self.tau_max, self.tau))
+
+            self._prev_error = error
+            self._prev_time = now
+
             return self.tau
-
-        # Error: positive means rate is too high, tau should tighten (decrease)
-        error = observed_rate - self.target_rate
-
-        self._integral += error * dt
-
-        derivative = (error - self._prev_error) / dt
-
-        adjustment = (self.kp * error) + (self.ki * self._integral) + (self.kd * derivative)
-
-        # Negative adjustment = tighten tau (lower distance threshold)
-        self.tau -= adjustment
-        self.tau = max(self.tau_min, min(self.tau_max, self.tau))
-
-        self._prev_error = error
-        self._prev_time = now
-
-        return self.tau
 
 
 @dataclass
 class ConversationTracker:
-    """Tracks whether a conversation has already received a recommendation."""
+    """
+    Tracks whether a conversation has already received a recommendation.
 
-    _conversations: dict = field(default_factory=dict)
+    Conversation IDs MUST be opaque tokens (UUIDs), never PII or PHI.
+    Conversations that exceed ttl_seconds are automatically evicted.
+    """
+
+    ttl_seconds: float = 3600.0  # evict conversations older than 1 hour
+    max_conversations: int = 100_000  # hard cap to prevent memory exhaustion
+
+    _conversations: dict = field(default_factory=dict, repr=False)
+    _start_times: dict = field(default_factory=dict, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def start(self, conversation_id: str):
-        self._conversations[conversation_id] = False
+        with self._lock:
+            self._evict_expired()
+            if len(self._conversations) >= self.max_conversations:
+                self._evict_oldest()
+            self._conversations[conversation_id] = False
+            self._start_times[conversation_id] = time.monotonic()
 
     def has_recommendation(self, conversation_id: str) -> bool:
-        return self._conversations.get(conversation_id, False)
+        with self._lock:
+            return self._conversations.get(conversation_id, False)
 
     def mark_recommended(self, conversation_id: str):
-        self._conversations[conversation_id] = True
+        with self._lock:
+            if conversation_id in self._conversations:
+                self._conversations[conversation_id] = True
 
     def end(self, conversation_id: str) -> bool:
         """End a conversation. Returns whether it received a recommendation."""
-        had_rec = self._conversations.pop(conversation_id, False)
-        return had_rec
+        with self._lock:
+            had_rec = self._conversations.pop(conversation_id, False)
+            self._start_times.pop(conversation_id, None)
+            return had_rec
+
+    def _evict_expired(self):
+        """Remove conversations that exceeded the TTL. Caller must hold _lock."""
+        now = time.monotonic()
+        expired = [
+            cid for cid, start in self._start_times.items()
+            if now - start > self.ttl_seconds
+        ]
+        for cid in expired:
+            self._conversations.pop(cid, None)
+            self._start_times.pop(cid, None)
+
+    def _evict_oldest(self):
+        """Remove the oldest conversation. Caller must hold _lock."""
+        if not self._start_times:
+            return
+        oldest = min(self._start_times, key=self._start_times.get)
+        self._conversations.pop(oldest, None)
+        self._start_times.pop(oldest, None)
 
 
 @dataclass
@@ -102,6 +150,7 @@ class RecommendationGate:
     tracker: ConversationTracker = field(default_factory=ConversationTracker)
     _recent_total: int = field(default=0, init=False)
     _recent_recommended: int = field(default=0, init=False)
+    _counter_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     update_interval: int = 100  # recalculate tau every N completed conversations
 
     def should_recommend(self, conversation_id: str, best_ad_distance: float) -> bool:
@@ -109,7 +158,7 @@ class RecommendationGate:
         Should this turn include a recommendation?
 
         Args:
-            conversation_id: unique ID for the conversation
+            conversation_id: opaque token (UUID). MUST NOT be PII or PHI.
             best_ad_distance: distance from the query embedding to the
                               nearest ad's center in embedding space
 
@@ -129,12 +178,14 @@ class RecommendationGate:
     def on_conversation_end(self, conversation_id: str):
         """Call when a conversation ends. Updates the observed rate."""
         had_rec = self.tracker.end(conversation_id)
-        self._recent_total += 1
-        if had_rec:
-            self._recent_recommended += 1
 
-        if self._recent_total >= self.update_interval:
-            observed_rate = self._recent_recommended / self._recent_total
-            self.controller.update(observed_rate)
-            self._recent_total = 0
-            self._recent_recommended = 0
+        with self._counter_lock:
+            self._recent_total += 1
+            if had_rec:
+                self._recent_recommended += 1
+
+            if self._recent_total >= self.update_interval:
+                observed_rate = self._recent_recommended / self._recent_total
+                self.controller.update(observed_rate)
+                self._recent_total = 0
+                self._recent_recommended = 0

@@ -33,6 +33,30 @@ When a new advertiser category enters (ad distances suddenly halve), τ tightens
 
 ![Tau recovery after shock](shock_recovery.png)
 
+### Seasonal drift
+
+Ad distance distributions shift with seasons (more commercial queries in Q4, fewer in Q1). The integral term tracks the slow drift:
+
+![Tau tracking through seasonal drift](seasonal_drift.png)
+
+### Robustness across seeds
+
+Same scenario (10% target) run across 20 random seeds. Mean final rate: 7.3% (target: 10%). All runs converge to the same neighborhood:
+
+![Robustness across seeds](robustness.png)
+
+## Privacy and security
+
+This code is designed for HIPAA/FTC-concerned publishers.
+
+- **No PII/PHI in, no PII/PHI out.** The code only processes distances (floats) and opaque conversation IDs (strings). It never sees embeddings, user data, or content.
+- **Conversation IDs must be opaque tokens** (UUIDs), never emails, patient IDs, or anything linkable to an individual.
+- **TTL eviction.** Conversations are automatically evicted after `ttl_seconds` (default: 1 hour) to prevent stale state from accumulating in memory.
+- **Hard cap.** `max_conversations` (default: 100,000) prevents memory exhaustion. Oldest conversations are evicted when the cap is hit.
+- **Thread-safe.** All shared state is protected by locks for concurrent request handling.
+- **Anti-windup.** The PID integral is clamped to `integral_max` to prevent runaway corrections from adversarial spikes.
+- **No network, no disk, no logging.** Pure computation. Nothing leaves the process.
+
 ## Usage
 
 ```python
@@ -41,7 +65,7 @@ from pid import TauController, RecommendationGate
 controller = TauController(target_rate=0.10)  # 10% of conversations
 gate = RecommendationGate(controller=controller)
 
-# On each conversation start
+# On each conversation start — use opaque tokens, never PII
 gate.tracker.start(conversation_id)
 
 # On each turn, check whether to show a recommendation
