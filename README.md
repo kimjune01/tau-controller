@@ -76,6 +76,14 @@ if gate.should_recommend(conversation_id, best_ad_distance):
 gate.on_conversation_end(conversation_id)
 ```
 
+## Interactive demo
+
+Open `demo.ipynb` to try it yourself. Change the target rate, re-run, and see how τ adjusts.
+
+```
+uv run --with matplotlib --with jupyter jupyter notebook demo.ipynb
+```
+
 ## Tests
 
 ```
