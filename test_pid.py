@@ -107,8 +107,9 @@ def test_gate_updates_tau_after_interval():
 
 def test_convergence():
     """Tau should converge toward a value that produces the target rate."""
-    ctrl = TauController(target_rate=0.10, tau=1.0, kp=0.3, ki=0.02, kd=0.05)
-    gate = RecommendationGate(controller=ctrl, update_interval=50)
+    # Uses default gains (kp=0.5, ki=0.05, kd=0.1)
+    ctrl = TauController(target_rate=0.10, tau=1.5)
+    gate = RecommendationGate(controller=ctrl, update_interval=100)
 
     import random
     random.seed(42)
@@ -117,19 +118,18 @@ def test_convergence():
         t = 0.0
         ctrl._prev_time = t
 
-        for batch in range(20):
-            t += 1.0
+        for i in range(5000):
+            t += 0.01
             mock_time.monotonic.return_value = t
 
-            for i in range(50):
-                cid = f"batch-{batch}-conv-{i}"
-                gate.tracker.start(cid)
-                # Random ad distances, uniformly distributed
-                distance = random.uniform(0.0, 3.0)
-                gate.should_recommend(cid, best_ad_distance=distance)
-                gate.on_conversation_end(cid)
+            cid = f"conv-{i}"
+            gate.tracker.start(cid)
+            distance = random.uniform(0.0, 3.0)
+            gate.should_recommend(cid, best_ad_distance=distance)
+            gate.on_conversation_end(cid)
 
-    # After 1000 conversations, tau should have adjusted.
-    # With uniform distances in [0, 3], the recommendation rate is tau/3.
-    # Target is 0.10, so tau should converge near 0.30.
-    assert 0.1 < ctrl.tau < 0.8
+    # With uniform distances in [0, 3], rate = tau/3.
+    # Target is 0.10, so equilibrium tau ≈ 0.30.
+    # Should converge within 50% of equilibrium
+    equilibrium_tau = 0.10 * 3.0
+    assert abs(ctrl.tau - equilibrium_tau) / equilibrium_tau < 0.50

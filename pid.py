@@ -8,9 +8,11 @@ space) to hit that target.
 Unit: per-conversation, not per-turn. A conversation is a series of turns.
 One recommendation per conversation, max.
 
-PRIVACY: This code never sees embeddings, user data, or content. It only
-processes distances (floats) and opaque conversation IDs (strings).
-Conversation IDs MUST be opaque tokens (e.g. UUIDs), never PII or PHI.
+PRIVACY: This code never sees embeddings, user data, or content. User
+embeddings are aggregated into distances upstream before reaching this
+controller. It only processes distances (floats) and opaque conversation
+IDs (strings). Conversation IDs MUST be opaque tokens (e.g. UUIDs), never
+PII or PHI.
 """
 
 import threading
